@@ -17,7 +17,7 @@ impl Reader {
                 println!("no more");
                 return Ok(());
             }
-            println!("{:?}", buffer);
+            println!("{:?}", &buffer[..bytes_read]);
         }
     }
 }
