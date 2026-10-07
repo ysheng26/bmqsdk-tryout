@@ -8,7 +8,7 @@ struct Reader {
 }
 
 impl Reader {
-    pub async fn run(mut self) -> Result<(), Box<dyn Error>> {
+    pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut buffer = [0; 10];
 
         loop {
@@ -34,8 +34,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     stream.write_all(b"hi").await?;
 
     let (rx, tx) = stream.into_split();
-    let reader = tokio::spawn(async move { Reader { rx } }).await?;
-    reader.run().await?;
+    let reader_handle = tokio::spawn(async move {
+        let reader = Reader { rx };
+        reader.run().await
+    });
+
+    let reader_res = reader_handle.await?;
+    reader_res.unwrap();
 
     Ok(())
 }
