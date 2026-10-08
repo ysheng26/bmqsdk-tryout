@@ -1,7 +1,8 @@
 use std::error::Error;
+use std::io::ErrorKind;
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::tcp::OwnedWriteHalf;
-use tokio::{io::AsyncReadExt, io::AsyncWriteExt, net::TcpStream};
+use tokio::{io::AsyncReadExt, net::TcpStream};
 
 struct Reader {
     rx: OwnedReadHalf,
@@ -29,17 +30,33 @@ struct Writer {
 impl Writer {
     pub async fn run(self) -> Result<(), Box<dyn Error + Send + Sync>> {
         //
-        self.tx.writable().await?;
-        self.tx.try_write(b"writer run")?;
+        let payload = b"writer run";
+        let mut total_bytes_wrote = 0;
+        while total_bytes_wrote < payload.len() {
+            self.tx.writable().await?;
+            let res = self.tx.try_write(&payload[total_bytes_wrote..]);
+            match res {
+                Ok(0) => return Err(std::io::Error::from(ErrorKind::WriteZero).into()),
+                Ok(bytes_wrote) => total_bytes_wrote += bytes_wrote,
+                Err(e) => {
+                    if e.kind() == ErrorKind::WouldBlock {
+                        continue;
+                    } else {
+                        return Err(e.into());
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     println!("Hello, world!");
 
-    let mut stream = TcpStream::connect("127.0.0.1:5555").await?;
+    let stream = TcpStream::connect("127.0.0.1:5555").await?;
     // stream.write_all(b"hi").await?;
 
     let (rx, tx) = stream.into_split();
@@ -53,8 +70,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         writer.run().await
     });
 
+    let writer_res = writer_handle.await?;
+    writer_res?;
+
     let reader_res = reader_handle.await?;
-    reader_res.unwrap();
+    reader_res?;
 
     Ok(())
 }
