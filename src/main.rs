@@ -58,6 +58,13 @@ struct Client {
     ch_tx: mpsc::Sender<Vec<u8>>,
 }
 
+impl Client {
+    pub async fn send(&self, payload: Vec<u8>) -> Result<(), Box<dyn Error + Sync + Send>> {
+        self.ch_tx.send(payload).await?;
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     println!("Hello, world!");
@@ -78,13 +85,17 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         writer.run().await
     });
 
-    // let client = ;
+    let client = Client { ch_tx };
 
-    let writer_res = writer_handle.await?;
-    writer_res?;
+    client.send(b"handshake from client".to_vec()).await?;
 
     let reader_res = reader_handle.await?;
     reader_res?;
+
+    drop(client);
+
+    let writer_res = writer_handle.await?;
+    writer_res?;
 
     Ok(())
 }
