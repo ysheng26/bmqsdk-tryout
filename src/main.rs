@@ -78,12 +78,19 @@ impl Coordinator {
     pub async fn run(mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         loop {
             tokio::select! {
-                Some(payload) = self.from_client_rx.recv() => {
-                    self.to_writer_tx.send(payload).await?;
+                maybe_payload = self.from_client_rx.recv() => {
+                    if let Some(payload) = maybe_payload {
+                        self.to_writer_tx.send(payload).await?;
+                    } else {
+                        return Ok(());
+                    }
                 }
-                Some(payload) = self.from_reader_rx.recv() => {
-                    // handle state?
-                    println!("coordinator: from_raeder_rx payload {:?}", payload);
+                maybe_payload = self.from_reader_rx.recv() => {
+                    if let Some(payload) = maybe_payload {
+                        println!("coordinator: from_raeder_rx payload {:?}", payload);
+                    } else {
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -95,6 +102,9 @@ impl Coordinator {
 //
 // read flow
 // tcp -> reader -> coordinator -> client
+//
+// state machine in coordinator
+// the client is the remote control
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
