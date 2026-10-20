@@ -58,20 +58,25 @@ impl Writer {
 }
 
 struct Client {
-    ch_tx: mpsc::Sender<Vec<u8>>,
+    to_coordinator_tx: mpsc::Sender<Vec<u8>>,
+    // from_coordinator_rx: mpsc::Receiver<Vec<u8>>,
 }
 
 impl Client {
     pub async fn send(&self, payload: Vec<u8>) -> Result<(), Box<dyn Error + Sync + Send>> {
-        self.ch_tx.send(payload).await?;
+        self.to_coordinator_tx.send(payload).await?;
         Ok(())
     }
 }
 
 struct Coordinator {
+    // client -> coordinator -> writer -> tcp
     from_client_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-    from_reader_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     to_writer_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+
+    // tcp -> reader -> coordinator -> client
+    from_reader_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    to_client_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
 }
 
 impl Coordinator {
@@ -88,6 +93,7 @@ impl Coordinator {
                 maybe_payload = self.from_reader_rx.recv() => {
                     if let Some(payload) = maybe_payload {
                         println!("coordinator: from_raeder_rx payload {:?}", payload);
+                        self.to_client_tx.send(payload).await?;
                     } else {
                         return Ok(());
                     }
@@ -116,6 +122,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (client_to_coordinator_tx, client_to_coordinator_rx) = tokio::sync::mpsc::channel(32);
     let (coordinator_to_writer_tx, coordinator_to_writer_rx) = tokio::sync::mpsc::channel(32);
     let (reader_to_coordinator_tx, reader_to_coordinator_rx) = tokio::sync::mpsc::channel(32);
+    let (coordinator_to_client_tx, mut coordinator_to_client_rx) = tokio::sync::mpsc::channel(32);
 
     let (tcp_rx, writer_to_tcp_tx) = stream.into_split();
     let reader_handle = tokio::spawn(async move {
@@ -128,14 +135,17 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // client to coordinator
     let client = Client {
-        ch_tx: client_to_coordinator_tx,
+        to_coordinator_tx: client_to_coordinator_tx,
+        // from_coordinator_rx: coordinator_to_client_rx,
     };
 
     let coordinator_handle = tokio::spawn(async move {
         let coordinator = Coordinator {
             from_client_rx: client_to_coordinator_rx,
-            from_reader_rx: reader_to_coordinator_rx,
             to_writer_tx: coordinator_to_writer_tx,
+
+            from_reader_rx: reader_to_coordinator_rx,
+            to_client_tx: coordinator_to_client_tx,
         };
         coordinator.run().await
     });
@@ -150,6 +160,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     });
 
     client.send(b"handshake from client".to_vec()).await?;
+
+    loop {
+        let res = coordinator_to_client_rx.recv().await;
+        if let Some(payload) = res {
+            println!("got payload from client response {:?}", payload);
+        } else {
+            break;
+        }
+    }
 
     let reader_res = reader_handle.await?;
     reader_res?;
