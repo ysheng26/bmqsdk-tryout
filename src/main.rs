@@ -68,7 +68,7 @@ struct Client {
 }
 
 impl Client {
-    pub async fn send(&self, payload: Vec<u8>) -> Result<(), Box<dyn Error + Sync + Send>> {
+    pub async fn send(&self, payload: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.to_coordinator_tx.send(payload).await?;
         Ok(())
     }
