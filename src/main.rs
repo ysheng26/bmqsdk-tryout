@@ -3,6 +3,7 @@ use std::io::ErrorKind;
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::{io::AsyncReadExt, net::TcpStream};
 
 struct Reader {
@@ -59,12 +60,78 @@ impl Writer {
 
 struct Client {
     to_coordinator_tx: mpsc::Sender<Vec<u8>>,
-    // from_coordinator_rx: mpsc::Receiver<Vec<u8>>,
+
+    // used to wait for client close
+    reader_handle: JoinHandle<Result<(), Box<dyn Error + Send + Sync>>>,
+    coordinator_handle: JoinHandle<Result<(), Box<dyn Error + Send + Sync>>>,
+    writer_handle: JoinHandle<Result<(), Box<dyn Error + Send + Sync>>>,
 }
 
 impl Client {
     pub async fn send(&self, payload: Vec<u8>) -> Result<(), Box<dyn Error + Sync + Send>> {
         self.to_coordinator_tx.send(payload).await?;
+        Ok(())
+    }
+
+    pub async fn connect(
+        address: &str,
+    ) -> Result<(Self, mpsc::Receiver<Vec<u8>>), Box<dyn Error + Send + Sync>> {
+        // address: 127.0.0.1:5555
+        let stream = TcpStream::connect(address).await?;
+        let (client_to_coordinator_tx, client_to_coordinator_rx) = tokio::sync::mpsc::channel(32);
+        let (coordinator_to_writer_tx, coordinator_to_writer_rx) = tokio::sync::mpsc::channel(32);
+        let (reader_to_coordinator_tx, reader_to_coordinator_rx) = tokio::sync::mpsc::channel(32);
+        let (coordinator_to_client_tx, coordinator_to_client_rx) = tokio::sync::mpsc::channel(32);
+
+        let (tcp_rx, writer_to_tcp_tx) = stream.into_split();
+        let reader_handle = tokio::spawn(async move {
+            let reader = Reader {
+                from_tcp_rx: tcp_rx,
+                to_coordinator_tx: reader_to_coordinator_tx,
+            };
+            reader.run().await
+        });
+
+        let coordinator_handle = tokio::spawn(async move {
+            let coordinator = Coordinator {
+                from_client_rx: client_to_coordinator_rx,
+                to_writer_tx: coordinator_to_writer_tx,
+
+                from_reader_rx: reader_to_coordinator_rx,
+                to_client_tx: coordinator_to_client_tx,
+            };
+            coordinator.run().await
+        });
+
+        // coordinator to writer
+        let writer_handle = tokio::spawn(async move {
+            let writer = Writer {
+                tcp_tx: writer_to_tcp_tx,
+                ch_rx: coordinator_to_writer_rx,
+            };
+            writer.run().await
+        });
+
+        let client = Client {
+            to_coordinator_tx: client_to_coordinator_tx,
+            reader_handle,
+            coordinator_handle,
+            writer_handle,
+        };
+
+        Ok((client, coordinator_to_client_rx))
+    }
+
+    pub async fn wait_close(self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let reader_res = self.reader_handle.await?;
+        reader_res?;
+
+        let coordinator_res = self.coordinator_handle.await?;
+        coordinator_res?;
+
+        let writer_res = self.writer_handle.await?;
+        writer_res?;
+
         Ok(())
     }
 }
@@ -116,53 +183,11 @@ impl Coordinator {
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     println!("Hello, world!");
 
-    let stream = TcpStream::connect("127.0.0.1:5555").await?;
-    // stream.write_all(b"hi").await?;
-
-    let (client_to_coordinator_tx, client_to_coordinator_rx) = tokio::sync::mpsc::channel(32);
-    let (coordinator_to_writer_tx, coordinator_to_writer_rx) = tokio::sync::mpsc::channel(32);
-    let (reader_to_coordinator_tx, reader_to_coordinator_rx) = tokio::sync::mpsc::channel(32);
-    let (coordinator_to_client_tx, mut coordinator_to_client_rx) = tokio::sync::mpsc::channel(32);
-
-    let (tcp_rx, writer_to_tcp_tx) = stream.into_split();
-    let reader_handle = tokio::spawn(async move {
-        let reader = Reader {
-            from_tcp_rx: tcp_rx,
-            to_coordinator_tx: reader_to_coordinator_tx,
-        };
-        reader.run().await
-    });
-
-    // client to coordinator
-    let client = Client {
-        to_coordinator_tx: client_to_coordinator_tx,
-        // from_coordinator_rx: coordinator_to_client_rx,
-    };
-
-    let coordinator_handle = tokio::spawn(async move {
-        let coordinator = Coordinator {
-            from_client_rx: client_to_coordinator_rx,
-            to_writer_tx: coordinator_to_writer_tx,
-
-            from_reader_rx: reader_to_coordinator_rx,
-            to_client_tx: coordinator_to_client_tx,
-        };
-        coordinator.run().await
-    });
-
-    // coordinator to writer
-    let writer_handle = tokio::spawn(async move {
-        let writer = Writer {
-            tcp_tx: writer_to_tcp_tx,
-            ch_rx: coordinator_to_writer_rx,
-        };
-        writer.run().await
-    });
-
+    let (client, mut rx) = Client::connect("127.0.0.1:5555").await?;
     client.send(b"handshake from client".to_vec()).await?;
 
     loop {
-        let res = coordinator_to_client_rx.recv().await;
+        let res = rx.recv().await;
         if let Some(payload) = res {
             println!("got payload from client response {:?}", payload);
         } else {
@@ -170,16 +195,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
 
-    let reader_res = reader_handle.await?;
-    reader_res?;
-
-    drop(client);
-
-    let coordinator_res = coordinator_handle.await?;
-    coordinator_res?;
-
-    let writer_res = writer_handle.await?;
-    writer_res?;
+    client.wait_close().await?;
 
     Ok(())
 }
